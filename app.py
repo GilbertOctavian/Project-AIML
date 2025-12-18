@@ -1,435 +1,402 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import datetime
 import time
 import random
 import matplotlib.pyplot as plt
 
 # ==========================================
-# KONFIGURASI DATA
+# CONFIG & CONSTANTS
 # ==========================================
+st.set_page_config(layout="wide", page_title="Port Logistics AI", initial_sidebar_state="expanded")
 
-# Konfigurasi Kapal (1 Hari ada 3 Kapal)
-SHIPS_PER_DAY = 3
-SHIP_NAMES = ["Kapal Logistik A (Cepat)", "Kapal Logistik B (Reguler)", "Kapal Logistik C (Kargo Besar)"]
-MAX_CAPACITY_PER_SHIP = 5000  # kg
+# CSS Custom: Styling Kotak KPI agar berwarna-warni
+st.markdown("""
+<style>
+    .stProgress > div > div > div > div { background-color: #1f77b4; }
+    
+    /* Base Box Style */
+    .kpi-box {
+        padding: 15px; 
+        border-radius: 8px; 
+        margin-bottom: 10px;
+    }
+    
+    /* Hijau (Uang/Revenue) */
+    .box-green {
+        background-color: #d1e7dd; 
+        border-left: 5px solid #198754;
+        color: #0f5132;
+    }
+    
+    /* Biru (Berat/Logistik) */
+    .box-blue {
+        background-color: #cff4fc; 
+        border-left: 5px solid #0dcaf0;
+        color: #055160;
+    }
+    
+    /* Kuning (Antrian/Order) */
+    .box-yellow {
+        background-color: #fff3cd; 
+        border-left: 5px solid #ffc107;
+        color: #664d03;
+    }
 
-# Data Tujuan
-DESTINATIONS = {
-    "Jakarta": {"distance": 700, "base_price_per_kg": 5000, "eta_days": 2},
-    "Makassar": {"distance": 1200, "base_price_per_kg": 8000, "eta_days": 4},
-    "Balikpapan": {"distance": 1000, "base_price_per_kg": 7500, "eta_days": 3},
-    "Medan": {"distance": 2000, "base_price_per_kg": 12000, "eta_days": 5},
-    "Jayapura": {"distance": 3500, "base_price_per_kg": 25000, "eta_days": 10}
+    .kpi-label { font-size: 14px; font-weight: bold; opacity: 0.8; }
+    .kpi-value { font-size: 26px; font-weight: 800; }
+</style>
+""", unsafe_allow_html=True)
+
+# Simulasi Armada: Feeder Vessel
+SHIPS = ["KM. Meratus Jaya", "KM. Tanto Line", "KM. SPIL Nusantara"]
+CAPACITY_PER_SHIP = 500000 # 500.000 kg (500 Ton)
+DAILY_CAPACITY = len(SHIPS) * CAPACITY_PER_SHIP
+PLAN_DAYS = 3 
+
+# Rute & Base Rate
+ROUTES = {
+    "Tanjung Priok (JKT)":  {"dist": 0,    "rate": 2500, "days": 1},
+    "Soekarno-Hatta (MKS)": {"dist": 1400, "rate": 4800, "days": 4},
+    "Semayang (BPN)":       {"dist": 1200, "rate": 4200, "days": 3},
+    "Belawan (MDN)":        {"dist": 1800, "rate": 5800, "days": 5},
+    "Jayapura (DJJ)":       {"dist": 3700, "rate": 9800, "days": 12}
 }
 
-# Data Barang
-ITEM_TYPES = [
-    "Elektronik (Asuransi Tinggi)",
-    "Pakaian & Tekstil",
-    "Makanan Kering",
-    "Furniture/Perabot",
-    "Otomotif/Sparepart"
-]
+# Tipe Container
+CONTAINER_TYPES = {
+    "LCL / Pallet (1 Ton)": 1000,
+    "Dry Container 20ft (20 Ton)": 20000,
+    "Dry Container 40ft (25 Ton)": 25000,
+    "Reefer / Frozen (25 Ton)": 25000 # Priority
+}
 
-TAX_RATE = 0.11
+GOODS_TYPE = ["General Cargo", "Electronics", "Textile", "FMCG", "Automotive Parts"]
+PPN = 0.11
 
 # ==========================================
-# FUNGSI BACKEND
+# HELPER FUNCTIONS
 # ==========================================
 
-def calculate_price(destination, weight, item_type):
-    dest_data = DESTINATIONS[destination]
-    base_cost = dest_data["base_price_per_kg"] * weight
+def get_quote(route, weight, goods, container_type):
+    route_info = ROUTES[route]
+    base_price = route_info["rate"] * weight
     
-    handling_fee = 0
-    if "Elektronik" in item_type:
-        handling_fee = base_cost * 0.05
-    elif "Furniture" in item_type:
-        handling_fee = 50000
+    # Surcharge logic
+    surcharge = 0
+    if "Reefer" in container_type:
+        surcharge = 3500000 
+    elif "Electronics" in goods:
+        surcharge = base_price * 0.08 
         
-    subtotal = base_cost + handling_fee
-    tax = subtotal * TAX_RATE
-    total_price = subtotal + tax
+    subtotal = base_price + surcharge
+    tax = subtotal * PPN
+    grand_total = subtotal + tax
     
-    return subtotal, tax, total_price, dest_data["eta_days"]
+    return subtotal, tax, grand_total, route_info["days"]
 
-# --- GREEDY ALGORITHM (SIMPLE & FAST) ---
-def schedule_shipments_greedy(orders):
-    if not orders:
-        return pd.DataFrame()
+def mock_data_gen(n=20):
+    clients = ["PT. Indofood", "Mayora Group", "Unilever Indo", "Astra Honda", "Semen Gresik", "Wings Food", "Erajaya", "Gudang Garam"]
+    data = []
+    for _ in range(n):
+        c_name = random.choices(list(CONTAINER_TYPES.keys()), weights=[30, 40, 15, 15], k=1)[0]
+        qty = random.randint(1, 2)
+        weight = CONTAINER_TYPES[c_name] * qty
+        dest = random.choice(list(ROUTES.keys()))
+        item = random.choice(GOODS_TYPE)
+        
+        sub, tax, total, eta = get_quote(dest, weight, item, c_name)
+        
+        data.append({
+            "id": 0, 
+            "client": random.choice(clients),
+            "item": item, "type": c_name,
+            "qty": qty, "weight": weight, "dest": dest,
+            "total": total, "eta": eta
+        })
+    return data
 
-    schedule = []
-    # Urutkan dari berat terbesar (Priority)
-    sorted_orders = sorted(orders, key=lambda x: x['weight'], reverse=True)
-    
-    current_day = 1
-    ship_capacities = {0: 0, 1: 0, 2: 0}
-    
-    for order in sorted_orders:
-        # LOGIKA LEAST LOADED (Cari kapal yang paling kosong)
-        best_ship_idx = -1
-        min_load = float('inf')
-        
-        for i in range(SHIPS_PER_DAY):
-            # Cek muat gak?
-            if ship_capacities[i] + order['weight'] <= MAX_CAPACITY_PER_SHIP:
-                # Cari yang load-nya paling kecil
-                if ship_capacities[i] < min_load:
-                    min_load = ship_capacities[i]
-                    best_ship_idx = i
-        
-        if best_ship_idx != -1:
-            ship_capacities[best_ship_idx] += order['weight']
-            schedule.append({
-                "Hari": f"Hari ke-{current_day}",
-                "Nama Kapal": SHIP_NAMES[best_ship_idx],
-                "ID Order": order['id'],
-                "Tujuan": order['destination'],
-                "Barang": order['item'],
-                "Berat Total (kg)": order['weight'],
-                "Estimasi Sampai": f"{order['eta']} hari lagi",
-                "Status": "Terjadwal (OK)"
-            })
-        else:
-            schedule.append({
-                "Hari": f"Hari ke-{current_day + 1}",
-                "Nama Kapal": "Waiting List",
-                "ID Order": order['id'],
-                "Tujuan": order['destination'],
-                "Barang": order['item'],
-                "Berat Total (kg)": order['weight'],
-                "Status": "Reschedule (Overload)",
-                "Estimasi Sampai": "-"
-            })
+# ==========================================
+# PSO ALGORITHM
+# ==========================================
 
-    return pd.DataFrame(schedule)
+def pso_scheduler(orders, particles=20, iterations=30):
+    if not orders: return [], []
+    dim = len(orders)
+    w, c1, c2 = 0.7, 1.4, 1.4 
+    
+    X = [np.random.rand(dim) for _ in range(particles)]
+    V = [np.random.rand(dim) * 0.1 for _ in range(particles)]
+    
+    pbest_X = X[:]
+    pbest_score = [float('inf')] * particles
+    gbest_X = X[0]
+    gbest_score = float('inf')
+    loss_history = []
 
-# --- ALGORITMA PSO (PARTICLE SWARM OPTIMIZATION) ---
-def run_pso_optimization(orders, num_particles=20, iterations=30):
-    # Parameter PSO Standard
-    w = 0.8    # Inertia (Seberapa besar partikel mempertahankan arah lama)
-    c1 = 1.5   # Cognitive (Belajar dari pengalaman sendiri)
-    c2 = 1.5   # Social (Belajar dari teman terbaik/GBest)
-    
-    dim = len(orders) # Setiap dimensi merepresentasikan prioritas 1 order
-    
-    # --- FUNGSI FITNESS (PENENTU KUALITAS JADWAL) ---
-    # Semakin KECIL nilai fitness, semakin BAGUS jadwalnya.
-    def calculate_fitness(priorities):
-        # 1. Mapping Priority dari Partikel ke Order
-        orders_with_prio = []
-        for i, order in enumerate(orders):
-            o = order.copy()
-            o['prio'] = priorities[i]
-            orders_with_prio.append(o)
-        
-        # 2. Urutkan Order berdasarkan Priority yang dibuat PSO
-        # Ini adalah inti "Otak" AI-nya: Mencari urutan masuk terbaik
-        sorted_by_pso = sorted(orders_with_prio, key=lambda x: x['prio'], reverse=True)
-        
-        # 3. Simulasi Masukin Barang ke Kapal
-        ship_caps = {0: 0, 1: 0, 2: 0} # Kapasitas terpakai
-        reschedule_weight = 0
-        temp_schedule = []
-        
-        for order in sorted_by_pso:
-            # Strategi: Masukkan ke kapal yang BEBANNYA PALING RINGAN (Load Balancing)
-            best_ship_idx = -1
-            min_load = float('inf')
+    def calc_cost(position_vector):
+        queue = []
+        for i, val in enumerate(position_vector):
+            prio_score = val
+            if "Reefer" in orders[i]['type']:
+                prio_score += 10.0 
+            queue.append((prio_score, orders[i]))
             
-            for i in range(SHIPS_PER_DAY):
-                # Syarat: Harus muat
-                if ship_caps[i] + order['weight'] <= MAX_CAPACITY_PER_SHIP:
-                    # Cari yang paling kosong
-                    if ship_caps[i] < min_load:
-                        min_load = ship_caps[i]
-                        best_ship_idx = i
+        queue.sort(key=lambda x: x[0], reverse=True)
+        ship_loads = {d: [0]*len(SHIPS) for d in range(1, PLAN_DAYS + 2)}
+        total_penalty = 0
+        
+        for _, order in queue:
+            assigned = False
+            for day in range(1, PLAN_DAYS + 1):
+                current_day_loads = ship_loads[day]
+                best_ship_idx = current_day_loads.index(min(current_day_loads))
+                
+                if current_day_loads[best_ship_idx] + order['weight'] <= CAPACITY_PER_SHIP:
+                    ship_loads[day][best_ship_idx] += order['weight']
+                    delay = day - 1
+                    cost = (delay * order['weight']) / 1000 
+                    
+                    if "Reefer" in order['type'] and delay > 0:
+                        cost += 5000000 
+                    
+                    total_penalty += cost
+                    assigned = True
+                    break
             
-            if best_ship_idx != -1:
-                ship_caps[best_ship_idx] += order['weight']
-                temp_schedule.append({
-                    "Hari": f"Hari ke-1",
-                    "Nama Kapal": SHIP_NAMES[best_ship_idx],
-                    "ID Order": order['id'],
-                    "Tujuan": order['destination'],
-                    "Barang": order['item'],
-                    "Berat Total (kg)": order['weight'],
-                    "Estimasi Sampai": f"{order['eta']} hari lagi",
-                    "Status": "Terjadwal (OK)"
-                })
-            else:
-                # Gagal muat -> Kena Penalty
-                reschedule_weight += order['weight']
-                temp_schedule.append({
-                    "Hari": f"Hari ke-2",
-                    "Nama Kapal": "Waiting List",
-                    "ID Order": order['id'],
-                    "Tujuan": order['destination'],
-                    "Barang": order['item'],
-                    "Berat Total (kg)": order['weight'],
-                    "Status": "Reschedule (Overload)",
-                    "Estimasi Sampai": "-"
-                })
+            if not assigned:
+                total_penalty += (order['weight']/1000) * 10000
         
-        # --- MENGHITUNG NILAI FITNESS (SCORE ERROR) ---
-        # 1. Penalty Utama: Berat yang gagal angkut (Harus diminimalkan!)
-        # 2. Penalty Tambahan: Ketimpangan beban antar kapal (Standard Deviasi)
-        #    Agar grafik tetap bergerak turun walau semua barang sudah muat.
-        
-        loads = list(ship_caps.values()) # Contoh: [1000, 5000, 200]
-        load_imbalance = np.std(loads)   # Mengukur seberapa timpang bebannya
-        
-        # Rumus Fitness: (Berat Gagal * 1000) + (Ketimpangan Beban)
-        # Kita kali 1000 supaya "Barang Masuk" jadi prioritas nomor 1.
-        fitness_score = (reschedule_weight * 1000) + load_imbalance
-        
-        return fitness_score, reschedule_weight, temp_schedule
+        all_loads = [load for d in ship_loads for load in ship_loads[d]]
+        total_penalty += np.std(all_loads) / 100
+        return total_penalty
 
-    # --- INISIALISASI PSO ---
-    # Partikel disebar random
-    particles = [np.random.rand(dim) for _ in range(num_particles)]
-    velocities = [np.random.rand(dim) * 0.1 for _ in range(num_particles)]
-    
-    pbest_pos = particles[:]
-    pbest_scores = [calculate_fitness(p)[0] for p in particles]
-    
-    # Cari GBest awal (Juara sementara)
-    gbest_score = min(pbest_scores)
-    gbest_idx = pbest_scores.index(gbest_score)
-    gbest_pos = pbest_pos[gbest_idx]
-    
-    fitness_history = []
-    
-    # --- LOOP ITERASI (PROSES BELAJAR AI) ---
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    for t in range(iterations):
-        for i in range(num_particles):
-            # Update Kecepatan & Posisi Partikel
+    for i in range(iterations):
+        for p in range(particles):
             r1, r2 = random.random(), random.random()
+            V[p] = w*V[p] + c1*r1*(pbest_X[p] - X[p]) + c2*r2*(gbest_X - X[p])
+            X[p] = np.clip(X[p] + V[p], 0, 1)
             
-            # Rumus Fisika PSO: v_baru = w*v_lama + c1*belajar_sendiri + c2*belajar_dari_gbest
-            velocities[i] = w * velocities[i] + \
-                            c1 * r1 * (pbest_pos[i] - particles[i]) + \
-                            c2 * r2 * (gbest_pos - particles[i])
-            
-            particles[i] = particles[i] + velocities[i]
-            particles[i] = np.clip(particles[i], 0, 1) # Tahan agar tidak keluar batas
-            
-            # Cek nilai fitness baru
-            current_fitness, _, _ = calculate_fitness(particles[i])
-            
-            # Update Personal Best (PBest)
-            if current_fitness < pbest_scores[i]:
-                pbest_scores[i] = current_fitness
-                pbest_pos[i] = particles[i]
-                
-                # Update Global Best (GBest)
-                if current_fitness < gbest_score:
-                    gbest_score = current_fitness
-                    gbest_pos = particles[i]
-        
-        # Simpan sejarah fitness untuk grafik
-        fitness_history.append(gbest_score)
-        
-        # Ambil data real weight untuk display status
-        _, gbest_real_weight, _ = calculate_fitness(gbest_pos)
-        
-        status_text.text(f"Iterasi {t+1}/{iterations} - Error Score: {gbest_score:.2f}")
-        progress_bar.progress((t + 1) / iterations)
+            score = calc_cost(X[p])
+            if score < pbest_score[p]:
+                pbest_score[p] = score
+                pbest_X[p] = X[p]
+                if score < gbest_score:
+                    gbest_score = score
+                    gbest_X = X[p]
+        loss_history.append(gbest_score)
     
-    # Ambil hasil akhir dari posisi terbaik
-    _, _, final_schedule = calculate_fitness(gbest_pos)
-    return pd.DataFrame(final_schedule), fitness_history
+    final_schedule = []
+    final_queue = []
+    for i, val in enumerate(gbest_X):
+        prio = val + (10.0 if "Reefer" in orders[i]['type'] else 0)
+        final_queue.append((prio, orders[i]))
+    final_queue.sort(key=lambda x: x[0], reverse=True)
+    
+    loads = {d: [0]*len(SHIPS) for d in range(1, PLAN_DAYS + 2)}
+    for _, order in final_queue:
+        assigned = False
+        for day in range(1, PLAN_DAYS + 1):
+            s_idx = loads[day].index(min(loads[day]))
+            if loads[day][s_idx] + order['weight'] <= CAPACITY_PER_SHIP:
+                loads[day][s_idx] += order['weight']
+                status = "On Schedule"
+                if "Reefer" in order['type']:
+                    status = "🔥 PRIORITY (Reefer)" if day == 1 else "⚠️ SPOILED (Late)"
+                elif day > 1:
+                    status = f"Reschedule H+{day-1}"
+                
+                final_schedule.append({**order, "Day": day, "Ship": SHIPS[s_idx], "Status": status})
+                assigned = True
+                break
+        if not assigned:
+            final_schedule.append({**order, "Day": 99, "Ship": "BACKLOG", "Status": "REJECTED"})
+            
+    return pd.DataFrame(final_schedule), loss_history
 
 # ==========================================
-# USER INTERFACE
+# UI / FRONTEND
 # ==========================================
+if 'db' not in st.session_state: st.session_state['db'] = []
 
-st.set_page_config(layout="wide", page_title="Sistem Logistik Kapal Laut")
+with st.sidebar:
+    st.header("🚢 Logistic System")
+    page = st.radio("Navigation", ["Customer Booking", "Ops Dashboard"])
+    st.divider()
+    if page == "Ops Dashboard":
+        st.subheader("Dev Tools")
+        if st.button("⚡ Generate 20 Mock Orders"):
+            new_data = mock_data_gen(20)
+            for d in new_data:
+                d['id'] = len(st.session_state['db']) + 1
+                st.session_state['db'].append(d)
+            st.success("20 Orders Injected!")
+            time.sleep(0.5)
+            st.rerun()
+        if st.button("🗑️ Flush Database"):
+            st.session_state['db'] = []
+            st.rerun()
 
-if 'orders_db' not in st.session_state:
-    st.session_state['orders_db'] = []
-
-# Sidebar
-st.sidebar.title("Navigasi Sistem")
-page_selection = st.sidebar.radio("Pilih Halaman:", ["Halaman Input Order", "Dashboard Admin"])
-
-# --- HALAMAN 1: INPUT ORDER ---
-if page_selection == "Halaman Input Order":
-    st.title("🚢 Input Order Pengiriman")
-    st.info("💡 TIPS: Masukkan minimal 5-10 order dengan berat bervariasi agar grafik PSO terlihat bergerak!")
-
-    st.sidebar.header("Panel Input Batch")
-    num_orders_input = st.sidebar.slider("Jumlah Pelanggan/Order:", 1, 15, 5) # Default 5 biar langsung banyak
+# PAGE 1: CUSTOMER
+if page == "Customer Booking":
+    st.title("📦 Cargo Booking Portal")
+    st.write("Input detail muatan untuk mendapatkan *Quotation*.")
     
-    with st.form("batch_order_form"):
-        batch_orders = []
-        for i in range(num_orders_input):
-            with st.expander(f"Order Pelanggan #{i+1}", expanded=(i==0)):
-                c_name = st.text_input(f"Nama Pengirim #{i+1}", key=f"name_{i}", value=f"Pelanggan {i+1}")
-                c_item = st.selectbox(f"Jenis Barang #{i+1}", ITEM_TYPES, key=f"item_{i}")
-                c_dest = st.selectbox(f"Tujuan #{i+1}", list(DESTINATIONS.keys()), key=f"dest_{i}")
-                
-                col_qty, col_weight = st.columns(2)
-                with col_qty:
-                    c_qty = st.number_input(f"Jumlah Barang (Qty) #{i+1}", min_value=1, value=1, step=1, key=f"q_{i}")
-                with col_weight:
-                    # Random value default biar user ga capek ngisi satu2
-                    def_val = random.randint(10, 100) * 10
-                    c_weight_per_item = st.number_input(f"Berat per Item (kg) #{i+1}", min_value=1, value=def_val, step=10, key=f"w_{i}")
-                
-                batch_orders.append({
-                    "name": c_name, "item": c_item, "dest": c_dest, 
-                    "qty": c_qty, "weight_per_item": c_weight_per_item
-                })
-        
-        if st.form_submit_button("🚀 Proses Semua Order"):
-            with st.spinner("Sedang menghitung biaya..."):
-                time.sleep(0.5)
-                count_success = 0
-                for order in batch_orders:
-                    if order["name"]:
-                        total_weight = order["qty"] * order["weight_per_item"]
-                        subtotal, tax, total, eta = calculate_price(order["dest"], total_weight, order["item"])
-                        
-                        new_entry = {
-                            "id": len(st.session_state['orders_db']) + 1,
-                            "customer": order["name"],
-                            "item": order["item"],
-                            "qty": order["qty"],
-                            "unit_weight": order["weight_per_item"],
-                            "weight": total_weight,
-                            "destination": order["dest"],
-                            "price": total,
-                            "eta": eta,
-                            "timestamp": datetime.datetime.now()
-                        }
-                        st.session_state['orders_db'].append(new_entry)
-                        count_success += 1
-                
-                if count_success > 0:
-                    st.success(f"Berhasil menambahkan {count_success} order baru!")
-                else:
-                    st.warning("Mohon isi nama pengirim.")
-
-    if st.session_state['orders_db']:
-        st.divider()
-        st.subheader("📋 Daftar Antrian Order")
-        df_display = pd.DataFrame(st.session_state['orders_db'])
-        if not df_display.empty:
-            cols = ["id", "customer", "destination", "item", "qty", "unit_weight", "weight", "price"]
-            df_show = df_display[cols]
-            df_show.columns = ["ID", "Pengirim", "Tujuan", "Barang", "Qty", "Berat/Item", "Total Berat", "Total Biaya"]
-            st.dataframe(df_show)
-
-# --- HALAMAN 2: DASHBOARD ADMIN ---
-elif page_selection == "Dashboard Admin":
-    st.title("👮‍♂️ Dashboard Admin & Optimasi AI")
-    
-    total_orders = len(st.session_state['orders_db'])
-    total_revenue = sum([o['price'] for o in st.session_state['orders_db']])
-    
-    st.markdown("### Rangkuman Finansial")
-    c1, c2 = st.columns(2)
-    c1.metric("Total Order Masuk", f"{total_orders} Unit")
-    c2.metric("Total Estimasi Revenue", f"Rp {total_revenue:,.0f}")
+    with st.container(border=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            client = st.text_input("Nama Perusahaan")
+            dest = st.selectbox("Pelabuhan Tujuan", list(ROUTES.keys()))
+            item = st.selectbox("Jenis Barang", GOODS_TYPE)
+        with c2:
+            ctype = st.selectbox("Tipe Kontainer", list(CONTAINER_TYPES.keys()))
+            qty = st.number_input("Jumlah Unit", 1, 50, 1)
+            
+            w_per_unit = CONTAINER_TYPES[ctype]
+            total_w = w_per_unit * qty
+            sub, tax, grand_tot, eta = get_quote(dest, total_w, item, ctype)
+            
+            st.info(f"Total Weight: **{total_w/1000:,.1f} Ton**")
+            if "Reefer" in ctype:
+                st.warning("❄️ Reefer Container selected (High Priority Handling)")
 
     st.divider()
     
-    tab_grafik, tab_jadwal = st.tabs(["📈 Grafik Statistik", "🤖 Optimasi Jadwal (PSO)"])
-
-    with tab_grafik:
-        st.subheader("Analisis Data Pengiriman")
-        if total_orders > 0:
-            df_chart = pd.DataFrame(st.session_state['orders_db'])
-            cc1, cc2 = st.columns(2)
-            with cc1:
-                st.write("**Sebaran Tujuan**")
-                st.bar_chart(df_chart['destination'].value_counts())
-            with cc2:
-                st.write("**Trend Pendapatan**")
-                st.line_chart(df_chart['price'])
+    # PRICING SECTION (GREEN BOX)
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Subtotal", f"Rp {sub:,.0f}")
+    k2.metric("PPN (11%)", f"Rp {tax:,.0f}")
+    
+    with k3:
+        st.markdown(f"""
+        <div class="kpi-box box-green">
+            <span class="kpi-label">TOTAL NETT</span><br>
+            <span class="kpi-value">Rp {grand_tot:,.0f}</span>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.write("") 
+    
+    if st.button("Submit Booking", type="primary", use_container_width=True):
+        if not client:
+            st.error("Nama Perusahaan wajib diisi!")
         else:
-            st.warning("Belum ada data.")
+            payload = {
+                "id": len(st.session_state['db']) + 1,
+                "client": client, "item": item, "type": ctype,
+                "qty": qty, "weight": total_w, "dest": dest,
+                "total": grand_tot, "eta": eta
+            }
+            st.session_state['db'].append(payload)
+            st.success("Booking Confirmed! DO (Delivery Order) has been issued.")
+            
+            with st.expander("📄 View Invoice", expanded=True):
+                st.markdown(f"""
+                **INVOICE #{payload['id']}** Client: {client} | Route: {dest}  
+                Cargo: {qty}x {ctype} ({item})  
+                **Total Paid: Rp {grand_tot:,.0f}**
+                """)
 
-    with tab_jadwal:
-        st.subheader("Penjadwalan Pengiriman")
-        st.write("Pilih metode untuk menyusun muatan kapal:")
-        
-        col_algo, col_act = st.columns([1, 2])
-        with col_algo:
-            algo_choice = st.radio("Metode Algoritma:", ["Greedy (Cepat)", "PSO (Machine Learning)"])
-        
-        with col_act:
-            st.info("Greedy: Cepat & simple. \nPSO: Mencari solusi terbaik lewat iterasi (lebih lama tapi cerdas).")
-            run_btn = st.button("Jalankan Optimasi", type="primary")
+# PAGE 2: ADMIN DASHBOARD
+elif page == "Ops Dashboard":
+    st.title("⚓ Operations Control Tower")
+    df = st.session_state['db']
+    
+    # KPI CARDS (COLORED BOXES)
+    total_ton = sum(x['weight'] for x in df) / 1000 if df else 0
+    est_rev = sum(x['total'] for x in df) if df else 0
+    pending_count = len(df)
+    
+    col1, col2, col3 = st.columns(3)
+    
+    # BOX 1: PENDING ORDER (YELLOW)
+    with col1:
+        st.markdown(f"""
+        <div class="kpi-box box-yellow">
+            <span class="kpi-label">PENDING DO</span><br>
+            <span class="kpi-value">{pending_count} Order</span>
+        </div>
+        """, unsafe_allow_html=True)
 
-        if run_btn:
-            if total_orders > 0:
-                schedule_df = pd.DataFrame()
+    # BOX 2: TOTAL TONNAGE (BLUE)
+    with col2:
+        st.markdown(f"""
+        <div class="kpi-box box-blue">
+            <span class="kpi-label">TOTAL TONNAGE</span><br>
+            <span class="kpi-value">{total_ton:,.1f} Ton</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # BOX 3: EST REVENUE (GREEN)
+    with col3:
+        st.markdown(f"""
+        <div class="kpi-box box-green">
+            <span class="kpi-label">EST. REVENUE</span><br>
+            <span class="kpi-value">Rp {est_rev/1000000:,.1f} Jt</span>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.divider()
+    
+    if not df:
+        st.info("No orders in queue. Use 'Dev Tools' in sidebar to generate mock data.")
+    else:
+        lc, rc = st.columns([1, 2])
+        with lc:
+            st.subheader("🤖 AI Scheduler")
+            st.caption("Algorithm: Particle Swarm Optimization (PSO)")
+            st.write("Mengoptimalkan Load Balancing kapal dan memprioritaskan Reefer Container.")
+            
+            if st.button("Run Optimization", type="primary", use_container_width=True):
+                with st.spinner("Calculating optimal stowage plan..."):
+                    time.sleep(1) 
+                    res_df, history = pso_scheduler(df)
+                    st.session_state['res'] = res_df
+                    st.session_state['hist'] = history
+                st.success("Optimization Complete.")
+            
+            if 'hist' in st.session_state:
+                st.markdown("### Cost Convergence")
+                fig, ax = plt.subplots(figsize=(4,3))
+                ax.plot(st.session_state['hist'], label='Penalty Score', color='#ff4b4b')
+                ax.set_xlabel('Iterations')
+                ax.set_ylabel('Cost')
+                ax.grid(True, alpha=0.3)
+                st.pyplot(fig)
+
+        with rc:
+            st.subheader("📅 Stowage Plan (Jadwal Muat)")
+            if 'res' in st.session_state:
+                res = st.session_state['res']
+                tabs = st.tabs(["DAY 1 (Priority)", "DAY 2", "DAY 3", "BACKLOG"])
                 
-                if algo_choice == "Greedy (Cepat)":
-                    with st.spinner("Menjalankan Algoritma Greedy..."):
-                        time.sleep(1)
-                        schedule_df = schedule_shipments_greedy(st.session_state['orders_db'])
-                        st.success("Jadwal Greedy Selesai!")
+                for i, tab in enumerate(tabs):
+                    day = i + 1
+                    with tab:
+                        if day < 4: daily_data = res[res['Day'] == day]
+                        else: daily_data = res[res['Day'] == 99]
                         
-                elif algo_choice == "PSO (Machine Learning)":
-                    st.write("---")
-                    st.markdown("##### ⚙️ Proses Training PSO")
-                    with st.spinner("Sedang melatih partikel..."):
-                        # JALANKAN PSO
-                        schedule_df, history = run_pso_optimization(st.session_state['orders_db'])
-                    
-                    st.success("Optimasi PSO Selesai!")
-                    
-                    st.markdown("##### 📉 Grafik Konvergensi Fitness PSO")
-                    st.caption("Grafik yang **MENURUN** artinya AI sedang belajar mengurangi error (menyeimbangkan muatan).")
-                    
-                    # Plotting Grafik
-                    fig, ax = plt.subplots(figsize=(10, 4))
-                    ax.plot(history, marker='o', linestyle='-', color='#007acc', markersize=4)
-                    ax.set_title("Perkembangan Nilai Fitness (Mencari Error Terkecil)")
-                    ax.set_xlabel("Iterasi (Waktu Belajar)")
-                    ax.set_ylabel("Nilai Error (Penalty + Ketimpangan)")
-                    ax.grid(True, linestyle='--', alpha=0.6)
-                    st.pyplot(fig)
-                
-                # --- HASIL JADWAL ---
-                if not schedule_df.empty:
-                    # Penanganan Error Kolom Kosong
-                    if "Status" not in schedule_df.columns: schedule_df["Status"] = "Terjadwal (OK)"
-                    if "Estimasi Sampai" not in schedule_df.columns: schedule_df["Estimasi Sampai"] = "-"
+                        if daily_data.empty: st.write("No operations scheduled.")
+                        else:
+                            cols = st.columns(len(SHIPS)) if day < 4 else [st.container()]
+                            ship_names = SHIPS if day < 4 else ["BACKLOG"]
+                            if day == 4: st.error(f"Failed to load: {len(daily_data)} items")
 
-                    st.write("---")
-                    st.subheader("📅 Hasil Penjadwalan Final")
-                    
-                    # Cek Reschedule
-                    rescheduled_items = schedule_df[schedule_df["Status"].astype(str).str.contains("Reschedule", na=False)]
-                    if len(rescheduled_items) == 0:
-                        st.success("✅ Semua barang berhasil dijadwalkan!")
-                    else:
-                        st.warning(f"⚠️ Ada {len(rescheduled_items)} barang harus di-reschedule.")
-
-                    # Tampilkan Data per Hari
-                    for day in sorted(schedule_df["Hari"].unique()):
-                        st.markdown(f"#### 🗓️ {day}")
-                        day_data = schedule_df[schedule_df["Hari"] == day]
-                        
-                        cols_to_show = ["Nama Kapal", "Tujuan", "Barang", "Berat Total (kg)", "Estimasi Sampai"]
-                        if day_data["Status"].astype(str).str.contains("Reschedule").any():
-                            cols_to_show.append("Status")
-                        
-                        st.dataframe(day_data[cols_to_show])
-                else:
-                    st.error("Gagal membuat jadwal.")
+                            for idx, s_name in enumerate(ship_names):
+                                with (cols[idx] if day < 4 else st.container()):
+                                    s_data = daily_data[daily_data['Ship'] == s_name]
+                                    load = s_data['weight'].sum()
+                                    st.markdown(f"**{s_name}**")
+                                    if day < 4:
+                                        pct = load / CAPACITY_PER_SHIP
+                                        st.progress(min(pct, 1.0))
+                                        st.caption(f"{load/1000:,.0f} / 500 Ton ({pct*100:.1f}%)")
+                                    
+                                    if not s_data.empty:
+                                        display_df = s_data[['dest', 'type', 'total', 'Status']].copy()
+                                        display_df['total'] = display_df['total'].apply(lambda x: f"{x/1e6:.1f}M")
+                                        st.dataframe(display_df, hide_index=True, use_container_width=True)
+                                    else:
+                                        st.markdown("*Idle*")
             else:
-                st.error("Data order kosong. Silakan input data terlebih dahulu.")
-
-# Footer
-st.sidebar.markdown("---")
-st.sidebar.caption("Sistem Logistik v5.0 (Final Fix)")
+                st.warning("Waiting for optimization trigger...")
