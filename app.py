@@ -94,6 +94,48 @@ def mock_data_gen(n=20):
         })
     return data
 
+# --- [BARU] FUNGSI MENGHITUNG KPI LOGISTIK ---
+def calculate_logistics_kpi(df_result):
+    if df_result.empty:
+        return 0, 0, 0, 0
+
+    # 1. SERVICE LEVEL (Fill Rate)
+    # Persentase barang yang berhasil dijadwalkan (Tidak masuk Backlog/Day 99)
+    total_orders = len(df_result)
+    success_orders = len(df_result[df_result['Day_Index'] != 99])
+    service_level = (success_orders / total_orders * 100) if total_orders > 0 else 0
+
+    # 2. PRIORITY COMPLIANCE
+    # Persentase barang Prioritas yang berhasil berangkat Hari 1 (On Time)
+    total_prio = len(df_result[df_result['is_priority'] == True])
+    # Priority dianggap sukses jika Day_Index == 1
+    success_prio = len(df_result[(df_result['is_priority'] == True) & (df_result['Day_Index'] == 1)])
+    
+    if total_prio > 0:
+        priority_compliance = (success_prio / total_prio * 100)
+    else:
+        priority_compliance = 100 # Jika tidak ada order prioritas, anggap compliance 100%
+
+    # 3. AVERAGE UTILIZATION (Ship Load Efficiency)
+    # Hanya hitung utilisasi kapal yang digunakan (Day 1-3)
+    successful_trips = df_result[df_result['Day_Index'] != 99]
+    
+    # Kelompokkan berdasarkan Hari dan Kapal untuk menghitung total beban per trip
+    voyage_loads = successful_trips.groupby(['Day_Index', 'Ship'])['weight'].sum().reset_index()
+    
+    # Hitung persentase terhadap kapasitas kapal (CAPACITY_PER_SHIP)
+    voyage_loads['utilization'] = (voyage_loads['weight'] / CAPACITY_PER_SHIP) * 100
+    
+    if not voyage_loads.empty:
+        avg_utilization = voyage_loads['utilization'].mean()
+    else:
+        avg_utilization = 0
+
+    # 4. TOTAL COST / PENALTY
+    total_penalty = df_result['Penalty'].sum()
+
+    return service_level, priority_compliance, avg_utilization, total_penalty
+
 # ==========================================
 # PSO ALGORITHM
 # ==========================================
@@ -325,16 +367,14 @@ elif page == "Ops Dashboard":
     
     st.divider()
     
-    # --- BAGIAN BARU: LIST ORDER RAW (SEBELUM AI) ---
+    # LIST ORDER RAW (SEBELUM AI)
     st.subheader("📋 Daftar Antrian Order (Raw Data)")
     
     if not df:
         st.info("Antrian kosong. Silakan generate order di sidebar.")
     else:
-        # Tampilkan Raw Data Table
         raw_df = pd.DataFrame(df)
         
-        # Formatting untuk display agar cantik
         display_raw = raw_df[['id', 'client', 'dest', 'type', 'weight', 'total', 'is_priority']].copy()
         display_raw['Priority'] = display_raw['is_priority'].apply(lambda x: "🔥 HIGH" if x else "Normal")
         display_raw['Weight (Ton)'] = display_raw['weight'] / 1000
@@ -344,12 +384,12 @@ elif page == "Ops Dashboard":
             display_raw[['id', 'client', 'dest', 'type', 'Priority', 'Weight (Ton)', 'Total Price']],
             use_container_width=True,
             hide_index=True,
-            height=200 # Fixed height biar ga kepanjangan
+            height=200 
         )
         
         st.divider()
         
-        # --- MULAI BAGIAN AI ---
+        # --- [MODIFIKASI] BAGIAN AI CONTROL DENGAN METRICS ---
         lc, rc = st.columns([1, 3])
         
         with lc:
@@ -365,12 +405,59 @@ elif page == "Ops Dashboard":
                     st.session_state['hist'] = history
                 st.success("Done!")
             
+            # --- MENAMPILKAN KPI BENCHMARK ---
+            if 'res' in st.session_state:
+                res_df = st.session_state['res']
+                
+                # Panggil fungsi KPI baru
+                srv_lvl, prio_rate, util, cost = calculate_logistics_kpi(res_df)
+                
+                st.markdown("### 📊 Optimization KPIs")
+                st.caption("Benchmark performa algoritma PSO:")
+                
+                # Baris 1: Kualitas Layanan
+                k1, k2 = st.columns(2)
+                k1.metric(
+                    "Service Level", 
+                    f"{srv_lvl:.1f}%", 
+                    help="% Barang yang berhasil dijadwalkan (Tidak Rejected)"
+                )
+                k2.metric(
+                    "Priority Compliance", 
+                    f"{prio_rate:.1f}%", 
+                    help="% Barang Prioritas yang berangkat Hari-1 (On-Time)"
+                )
+                
+                # Baris 2: Efisiensi Operasional
+                k3, k4 = st.columns(2)
+                k3.metric(
+                    "Avg. Ship Utilization", 
+                    f"{util:.1f}%", 
+                    help="Rata-rata keterisian muatan kapal"
+                )
+                k4.metric(
+                    "Total Penalty", 
+                    f"{cost/1000000:.1f} M", 
+                    help="Total kerugian (makin kecil makin bagus)",
+                    delta_color="inverse"
+                )
+                
+                # Analisis Singkat
+                if prio_rate < 100:
+                    st.warning("⚠️ Perhatian: Ada barang Prioritas yang terlambat.")
+                if util < 50:
+                    st.info("ℹ️ Info: Kapal berjalan kurang efisien (muatan sedikit).")
+                if srv_lvl == 100 and prio_rate == 100:
+                    st.success("✅ Jadwal Optimal!")
+
+            # Grafik Cost
             if 'hist' in st.session_state:
                 st.markdown("### Cost Graph")
                 fig, ax = plt.subplots(figsize=(4,3))
                 ax.plot(st.session_state['hist'], label='Penalty', color='#ff4b4b')
+                ax.set_title("Convergence")
                 ax.set_xlabel('Iterasi')
-                ax.set_ylabel('Cost')
+                ax.set_ylabel('Penalty')
                 ax.grid(True, alpha=0.3)
                 st.pyplot(fig)
 
