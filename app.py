@@ -65,10 +65,10 @@ ROUTES = {
 
 # Tipe Container
 CONTAINER_TYPES = {
-    "LCL / Pallet (1 Ton)": 1000,
-    "Dry Container 20ft (20 Ton)": 20000,
-    "Dry Container 40ft (25 Ton)": 25000,
-    "Reefer / Frozen (25 Ton)": 25000 # Priority
+    "Kelas A (1 Ton)": 1000,
+    "Kelas B 20ft (20 Ton)": 20000,
+    "Kelas C 40ft (25 Ton)": 25000,
+    "Priority (25 Ton)": 25000 # Priority
 }
 
 GOODS_TYPE = ["General Cargo", "Electronics", "Textile", "FMCG", "Automotive Parts"]
