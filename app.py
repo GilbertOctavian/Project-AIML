@@ -6,9 +6,8 @@ import random
 import matplotlib.pyplot as plt
 from datetime import date, timedelta 
 
-# ==========================================
+
 # CONFIG & CONSTANTS
-# ==========================================
 st.set_page_config(layout="wide", page_title="Port Logistics AI", initial_sidebar_state="expanded")
 
 # CSS Custom
@@ -29,8 +28,6 @@ st.markdown("""
 
 # Armada
 SHIPS = ["KM. Meratus Jaya", "KM. Tanto Line", "KM. SPIL Nusantara"]
-CAPACITY_PER_SHIP = 500000 # 500 Ton
-DAILY_CAPACITY = len(SHIPS) * CAPACITY_PER_SHIP
 PLAN_DAYS = 3 
 
 # Rute
@@ -52,9 +49,9 @@ CLASS_TYPES = {
 GOODS_TYPE = ["General Cargo", "Electronics", "Textile", "FMCG", "Automotive Parts"]
 PPN = 0.11
 
-# ==========================================
+
 # HELPER FUNCTIONS
-# ==========================================
+
 
 def get_quote(route, weight, goods, is_priority):
     route_info = ROUTES[route]
@@ -94,37 +91,29 @@ def mock_data_gen(n=20):
         })
     return data
 
-# --- [BARU] FUNGSI MENGHITUNG KPI LOGISTIK ---
-def calculate_logistics_kpi(df_result):
+# FUNGSI MENGHITUNG KPI LOGISTIK
+def calculate_logistics_kpi(df_result, capacity_per_ship):
     if df_result.empty:
         return 0, 0, 0, 0
 
     # 1. SERVICE LEVEL (Fill Rate)
-    # Persentase barang yang berhasil dijadwalkan (Tidak masuk Backlog/Day 99)
     total_orders = len(df_result)
     success_orders = len(df_result[df_result['Day_Index'] != 99])
     service_level = (success_orders / total_orders * 100) if total_orders > 0 else 0
 
     # 2. PRIORITY COMPLIANCE
-    # Persentase barang Prioritas yang berhasil berangkat Hari 1 (On Time)
     total_prio = len(df_result[df_result['is_priority'] == True])
-    # Priority dianggap sukses jika Day_Index == 1
     success_prio = len(df_result[(df_result['is_priority'] == True) & (df_result['Day_Index'] == 1)])
     
     if total_prio > 0:
         priority_compliance = (success_prio / total_prio * 100)
     else:
-        priority_compliance = 100 # Jika tidak ada order prioritas, anggap compliance 100%
+        priority_compliance = 100 
 
-    # 3. AVERAGE UTILIZATION (Ship Load Efficiency)
-    # Hanya hitung utilisasi kapal yang digunakan (Day 1-3)
+    # 3. AVERAGE UTILIZATION
     successful_trips = df_result[df_result['Day_Index'] != 99]
-    
-    # Kelompokkan berdasarkan Hari dan Kapal untuk menghitung total beban per trip
     voyage_loads = successful_trips.groupby(['Day_Index', 'Ship'])['weight'].sum().reset_index()
-    
-    # Hitung persentase terhadap kapasitas kapal (CAPACITY_PER_SHIP)
-    voyage_loads['utilization'] = (voyage_loads['weight'] / CAPACITY_PER_SHIP) * 100
+    voyage_loads['utilization'] = (voyage_loads['weight'] / capacity_per_ship) * 100
     
     if not voyage_loads.empty:
         avg_utilization = voyage_loads['utilization'].mean()
@@ -136,11 +125,11 @@ def calculate_logistics_kpi(df_result):
 
     return service_level, priority_compliance, avg_utilization, total_penalty
 
-# ==========================================
-# PSO ALGORITHM
-# ==========================================
 
-def pso_scheduler(orders, particles=20, iterations=30):
+# PSO ALGORITHM
+
+
+def pso_scheduler(orders, capacity_per_ship, particles=20, iterations=30):
     if not orders: return [], []
     dim = len(orders)
     w, c1, c2 = 0.7, 1.4, 1.4 
@@ -172,7 +161,7 @@ def pso_scheduler(orders, particles=20, iterations=30):
                 current_day_loads = ship_loads[day]
                 best_ship_idx = current_day_loads.index(min(current_day_loads))
                 
-                if current_day_loads[best_ship_idx] + order['weight'] <= CAPACITY_PER_SHIP:
+                if current_day_loads[best_ship_idx] + order['weight'] <= capacity_per_ship:
                     ship_loads[day][best_ship_idx] += order['weight']
                     delay = day - 1
                     cost = (delay * order['weight']) / 1000 
@@ -185,11 +174,29 @@ def pso_scheduler(orders, particles=20, iterations=30):
                     break
             
             if not assigned:
-                total_penalty += (order['weight']/1000) * 10000
+                # [PERBAIKAN LOGIC PENALTY]
+                # Agar grafik tidak flat:
+                # 1. Denda dasar
+                base_penalty = (order['weight']/1000) * 10000 
+                
+                # 2. Jika Priority, denda SANGAT BESAR (Agar AI berusaha keras memasukkannya)
+                if order.get('is_priority', False):
+                    base_penalty *= 100  # Denda priority diperbesar 100x
+                
+                # 3. Tambahkan harga barang ke denda (Agar AI membuang barang murah dulu)
+                base_penalty += order['total'] / 500
+                
+                total_penalty += base_penalty
         
+        # Load Balancing Penalty (opsional, kecil saja)
         all_loads = [load for d in ship_loads for load in ship_loads[d]]
-        total_penalty += np.std(all_loads) / 100
+        total_penalty += np.std(all_loads) / 1000 
+        
         return total_penalty
+
+    # Progress bar container
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
     for i in range(iterations):
         for p in range(particles):
@@ -205,6 +212,10 @@ def pso_scheduler(orders, particles=20, iterations=30):
                     gbest_score = score
                     gbest_X = X[p]
         loss_history.append(gbest_score)
+        
+        # Update progress visual
+        progress_bar.progress((i + 1) / iterations)
+        status_text.caption(f"Iterasi {i+1}/{iterations} | Best Loss: {gbest_score:,.0f}")
     
     final_schedule = []
     final_queue = []
@@ -221,7 +232,7 @@ def pso_scheduler(orders, particles=20, iterations=30):
         assigned = False
         for day in range(1, PLAN_DAYS + 1):
             s_idx = loads[day].index(min(loads[day]))
-            if loads[day][s_idx] + order['weight'] <= CAPACITY_PER_SHIP:
+            if loads[day][s_idx] + order['weight'] <= capacity_per_ship:
                 loads[day][s_idx] += order['weight']
                 
                 ship_date = today + timedelta(days=day) 
@@ -250,38 +261,79 @@ def pso_scheduler(orders, particles=20, iterations=30):
                 assigned = True
                 break
         if not assigned:
+            # Display penalty yang sangat besar untuk visualisasi
+            disp_pen = 999999
+            if order.get('is_priority', False): disp_pen = 50000000
+            
             final_schedule.append({
                 **order, 
                 "Day_Index": 99, 
                 "Tanggal": "TBD", 
                 "Ship": "BACKLOG", 
-                "Penalty": 999999,
+                "Penalty": disp_pen,
                 "Status": "REJECTED"
             })
             
     return pd.DataFrame(final_schedule), loss_history
 
-# ==========================================
 # UI / FRONTEND
-# ==========================================
+
 if 'db' not in st.session_state: st.session_state['db'] = []
 
 with st.sidebar:
     st.header("🚢 Logistic System")
     page = st.radio("Navigation", ["Customer Booking", "Ops Dashboard"])
     st.divider()
+    
+    # [input] Slider Kapasitas agar user bisa test Stress Test
+    st.subheader("⚙️ Simulation Params")
+    # Default 500 Ton, bisa dinaikkan sampai 5000 Ton (5 Juta Kg)
+    input_capacity_ton = st.slider("Kapasitas Per Kapal (Ton)", 
+                                   min_value=100, 
+                                   max_value=5000, 
+                                   value=500, 
+                                   step=100,
+                                   help="Naikkan ini jika order > 200 agar grafik tidak flat")
+    
+    # Konversi ke Kg untuk perhitungan backend
+    CAPACITY_PER_SHIP_REAL = input_capacity_ton * 1000 
+    
+    with st.expander("ℹ️ Lihat Asumsi Simulasi", expanded=False):
+        st.markdown(f"""
+        **1. Daily Fleet Availability**
+        Armada dianggap selalu tersedia setiap hari.
+        
+        **2. Weight-Only Constraint**
+        Batasan kapasitas kapal saat ini: **{input_capacity_ton} Ton**.
+        
+        **3. Fixed Horizon (3 Days)**
+        Order yang tidak muat dalam 3 hari dianggap **Backlog**.
+        """)
+
     if page == "Ops Dashboard":
         st.subheader("Dev Tools")
-        if st.button("⚡ Generate 20 Mock Orders"):
-            new_data = mock_data_gen(20)
+        if st.button("⚡ Generate 100 Mock Orders"):
+            new_data = mock_data_gen(100) 
             for d in new_data:
                 d['id'] = len(st.session_state['db']) + 1
                 st.session_state['db'].append(d)
-            st.success("20 Orders Injected!")
+            st.success("100 Orders Injected!")
             time.sleep(0.5)
             st.rerun()
+            
+        # Tombol test extreme
+        if st.button("🔥 Generate 300 Orders (Stress Test)"):
+            new_data = mock_data_gen(300) 
+            for d in new_data:
+                d['id'] = len(st.session_state['db']) + 1
+                st.session_state['db'].append(d)
+            st.warning("300 Orders Injected! Pastikan menaikkan Kapasitas Kapal.")
+            time.sleep(0.5)
+            st.rerun()
+            
         if st.button("🗑️ Flush Database"):
             st.session_state['db'] = []
+            if 'res' in st.session_state: del st.session_state['res']
             st.rerun()
 
 # PAGE 1: CUSTOMER
@@ -389,7 +441,7 @@ elif page == "Ops Dashboard":
         
         st.divider()
         
-        # --- [MODIFIKASI] BAGIAN AI CONTROL DENGAN METRICS ---
+        # AI CONTROL 
         lc, rc = st.columns([1, 3])
         
         with lc:
@@ -397,58 +449,45 @@ elif page == "Ops Dashboard":
             st.caption("Algorithm: PSO")
             st.write("Optimasi muatan kapal dan prioritas.")
             
+            # Info Kapasitas Aktif
+            st.info(f"**Kapasitas Aktif:** {CAPACITY_PER_SHIP_REAL/1000:,.0f} Ton / Kapal")
+
             if st.button("Run Optimization", type="primary", use_container_width=True):
                 with st.spinner("Calculating optimal stowage plan..."):
-                    time.sleep(1) 
-                    res_df, history = pso_scheduler(df)
+                    time.sleep(0.5) 
+                    # Passing Capacity Real dari Slider ke PSO
+                    res_df, history = pso_scheduler(df, CAPACITY_PER_SHIP_REAL)
                     st.session_state['res'] = res_df
                     st.session_state['hist'] = history
                 st.success("Done!")
             
-            # --- MENAMPILKAN KPI BENCHMARK ---
+            # KPI BENCHMARK
             if 'res' in st.session_state:
                 res_df = st.session_state['res']
                 
-                # Panggil fungsi KPI baru
-                srv_lvl, prio_rate, util, cost = calculate_logistics_kpi(res_df)
+                # Panggil fungsi KPI baru dengan Capacity Real
+                srv_lvl, prio_rate, util, cost = calculate_logistics_kpi(res_df, CAPACITY_PER_SHIP_REAL)
                 
                 st.markdown("### 📊 Optimization KPIs")
                 st.caption("Benchmark performa algoritma PSO:")
                 
                 # Baris 1: Kualitas Layanan
                 k1, k2 = st.columns(2)
-                k1.metric(
-                    "Service Level", 
-                    f"{srv_lvl:.1f}%", 
-                    help="% Barang yang berhasil dijadwalkan (Tidak Rejected)"
-                )
-                k2.metric(
-                    "Priority Compliance", 
-                    f"{prio_rate:.1f}%", 
-                    help="% Barang Prioritas yang berangkat Hari-1 (On-Time)"
-                )
+                k1.metric("Service Level", f"{srv_lvl:.1f}%", help="% Barang yang berhasil dijadwalkan")
+                k2.metric("Priority Compliance", f"{prio_rate:.1f}%", help="% Barang Prioritas On-Time")
                 
                 # Baris 2: Efisiensi Operasional
                 k3, k4 = st.columns(2)
-                k3.metric(
-                    "Avg. Ship Utilization", 
-                    f"{util:.1f}%", 
-                    help="Rata-rata keterisian muatan kapal"
-                )
-                k4.metric(
-                    "Total Penalty", 
-                    f"{cost/1000000:.1f} M", 
-                    help="Total kerugian (makin kecil makin bagus)",
-                    delta_color="inverse"
-                )
+                k3.metric("Avg. Ship Utilization", f"{util:.1f}%", help="Rata-rata keterisian muatan kapal")
+                k4.metric("Total Penalty", f"{cost/1000000:.1f} M", help="Total kerugian", delta_color="inverse")
                 
                 # Analisis Singkat
                 if prio_rate < 100:
                     st.warning("⚠️ Perhatian: Ada barang Prioritas yang terlambat.")
-                if util < 50:
-                    st.info("ℹ️ Info: Kapal berjalan kurang efisien (muatan sedikit).")
-                if srv_lvl == 100 and prio_rate == 100:
-                    st.success("✅ Jadwal Optimal!")
+                if util > 95 and srv_lvl < 100:
+                    st.error("🚨 Overload! Naikkan Kapasitas Kapal di Sidebar.")
+                elif srv_lvl == 100:
+                    st.success("✅ Semua terangkut!")
 
             # Grafik Cost
             if 'hist' in st.session_state:
@@ -490,9 +529,9 @@ elif page == "Ops Dashboard":
                                     load = s_data['weight'].sum()
                                     st.markdown(f"**{s_name}**")
                                     if day_idx < 4:
-                                        pct = load / CAPACITY_PER_SHIP
+                                        pct = load / CAPACITY_PER_SHIP_REAL
                                         st.progress(min(pct, 1.0))
-                                        st.caption(f"{load/1000:,.0f} / 500 Ton ({pct*100:.1f}%)")
+                                        st.caption(f"{load/1000:,.0f} / {CAPACITY_PER_SHIP_REAL/1000:,.0f} Ton ({pct*100:.1f}%)")
                                     
                                     if not s_data.empty:
                                         display_df = s_data[['dest', 'type', 'Status']].copy()
